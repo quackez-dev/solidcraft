@@ -1,0 +1,168 @@
+# CraftTools: the audited build of SolidCraft. Windows: MSI + portable zip + plain .exe (plus the
+# .pdb symbols and the Group Policy templates, as zips). Linux: AppImage, .deb, .rpm, .tar.gz.
+# All unsigned.
+#
+# - Code: this repository (quackez-dev/solidcraft), branch main = audited upstream tag + CraftTools patches.
+#   SolidCraft has no git dependencies: everything else is crates.io, checked by the Cargo.lock
+#   checksums (`--locked`), and vendor/ (in this repository, audited).
+# - Actions: only GitHub's own, pinned by commit SHA. No upstream workflow, no secret.
+# - SOLIDCRAFT_VERSION is left unset: the binary is not a "release build" for the updater either
+#   (the CraftTools patch already turns update checks off).
+# - The build runs offline (`--offline`). On Linux it also runs in a network namespace with no
+#   network at all.
+# - Packaging tools are pinned by version and SHA-256 (WiX by version, from NuGet).
+name: CraftTools build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['crafttools-v*']
+
+permissions:
+  contents: read
+
+env:
+  # The version upstream pins in rust-toolchain.toml. RUSTUP_TOOLCHAIN overrides that file, so
+  # rustup never tries to install its extra targets and components (inside `unshare --net` it
+  # could not anyway).
+  RUST_TOOLCHAIN: 1.99.1
+  RUSTUP_TOOLCHAIN: 1.99.1
+  NFPM_VERSION: 2.48.0
+  NFPM_SHA256: 787af76e172dd5fc7cedf4d7c5a090a2f62be9001557a4db1103e270f90ddefd
+  APPIMAGETOOL_VERSION: 1.9.1
+  APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+  APPIMAGE_RUNTIME_VERSION: '20251108'
+  APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+  GIT_LFS_SKIP_SMUDGE: '1'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out SolidCraft
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: solidcraft
+          persist-credentials: false
+          lfs: false
+
+      - name: Record the build date
+        run: echo "SOLIDCRAFT_BUILD_DATE=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libdbus-1-dev desktop-file-utils appstream
+
+      - name: Fetch crates (crates.io, Cargo.lock checksums)
+        working-directory: solidcraft
+        run: cargo fetch --locked
+
+      - name: Build (Linux, no network)
+        if: runner.os == 'Linux'
+        working-directory: solidcraft
+        run: |
+          unshare --net --map-root-user -- \
+            cargo build --release --locked --offline -p solidcraft -p solidcraft-cli
+
+      - name: Build (Windows, offline)
+        if: runner.os == 'Windows'
+        working-directory: solidcraft
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        # Two invocations, as packaging/windows/package.ps1 does: built together, the app's wgpu GL
+        # backend reaches the CLI, and package.ps1 refuses a CLI that imports opengl32.dll.
+        run: |
+          cargo build --release --locked --offline -p solidcraft --target x86_64-pc-windows-msvc
+          cargo build --release --locked --offline -p solidcraft-cli --target x86_64-pc-windows-msvc
+
+      - name: Install WiX 5.0.2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+
+      - name: Package (Windows, unsigned)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: solidcraft
+        env:
+          DIST: ${{ github.workspace }}\dist
+        run: ./packaging/windows/package.ps1 -Arch x64 -SkipBuild
+
+      - name: Install nfpm ${{ env.NFPM_VERSION }}, appimagetool ${{ env.APPIMAGETOOL_VERSION }} and the AppImage runtime
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl --proto '=https' -fsSL -o "$RUNNER_TEMP/nfpm.deb" \
+            "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "$NFPM_SHA256  $RUNNER_TEMP/nfpm.deb" | sha256sum -c -
+          sudo dpkg -i "$RUNNER_TEMP/nfpm.deb"
+          curl --proto '=https' -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
+          echo "$APPIMAGETOOL_SHA256  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          curl --proto '=https' -fsSL -o "$RUNNER_TEMP/appimage-runtime" \
+            "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-x86_64"
+          echo "$APPIMAGE_RUNTIME_SHA256  $RUNNER_TEMP/appimage-runtime" | sha256sum -c -
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$RUNNER_TEMP/appimage-runtime" >> "$GITHUB_ENV"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        working-directory: solidcraft
+        env:
+          DIST: ${{ github.workspace }}/dist
+          SOLIDCRAFT_MAINTAINER: CraftTools build <noreply@github.com>
+        run: packaging/linux/package.sh --skip-build --formats "appimage deb rpm tar"
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          rm -f ./*.zsync
+          sha256sum -- * > "SHA256SUMS-${{ runner.os }}.txt"
+          cat "SHA256SUMS-${{ runner.os }}.txt"
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: solidcraft-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/crafttools-v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Publish the release (private repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ github.run_id }}" -R "${{ github.repository }}" -D dist
+          gh release create "$TAG" -R "${{ github.repository }}" --title "SolidCraft $TAG (CraftTools)" \
+            --notes "Audited build of SolidCraft (commit ${{ github.sha }}). Unsigned. Audit: CraftTools/audits/solidcraft." \
+            dist/*/*

@@ -704,12 +704,11 @@ pub fn offered(app: &SolveApp) -> Option<&Release> {
     app.preferences.update.offers(r, current_version(), unix_now()).then_some(r)
 }
 
-/// Checks may run here: a release build with the host's HTTP client, or a test feed, unless the
-/// organization's policy turned checks off.
-pub fn available(app: &mut SolveApp) -> bool {
-    !app.updater.off
-        && app.policy.mandatory.check_for_updates != Some(false)
-        && (app.updater.feed.is_some() || (app.services.http_get.is_some() && app.updater.kind().checks()))
+/// Checks may run here: never. CraftTools: this audited build never asks GitHub for a release nor
+/// installs one; its updates come from the private mirror after review. Help, Preferences and the
+/// control channel show `update.check_unavailable`.
+pub fn available(_app: &mut SolveApp) -> bool {
+    false
 }
 
 /// Per frame: the first frame of each launch starts an automatic check, the open app checks
@@ -871,6 +870,10 @@ pub fn install_method(app: &mut SolveApp) -> Option<install::Method> {
 
 /// Re-check the feed, then download, verify and apply the newest release (Update now).
 pub fn start_install(app: &mut SolveApp, ctx: &egui::Context) {
+    // CraftTools: no installation either (see `available`).
+    if !available(app) {
+        return;
+    }
     let (Some(release), Some(method), Some(get), Some(download)) =
         (app.updater.release.clone(), install_method(app), app.services.http_get.clone(), app.services.http_download.clone())
     else {

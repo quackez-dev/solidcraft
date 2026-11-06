@@ -1815,7 +1815,9 @@ preference_settings! {
     agent_control_port: u16 = 27878, PAGE_ASSISTANT;
     /// Add SolidCraft's MCP server to the AI apps installed on this computer at start-up
     /// ([`crate::ai_connect`]); off takes the entries out again.
-    connect_ai_apps: bool = true, PAGE_ASSISTANT;
+    /// CraftTools: off, and the start-up step is not armed (apps/solidcraft/src/main.rs); Help ▸
+    /// Connect AI assistants still does it when asked.
+    connect_ai_apps: bool = false, PAGE_ASSISTANT;
     /// Agents the user added (the installed ones are found by themselves). API keys are never
     /// here: they live in the system keychain.
     agents: Vec<crate::agent_chat::agents::AgentConfig> = Vec::new();

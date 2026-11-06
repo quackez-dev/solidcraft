@@ -281,8 +281,9 @@ impl eframe::App for App {
                 #[cfg(target_os = "macos")]
                 std::thread::spawn(solidcraft_ui_egui::cli_link::install_on_launch);
                 // Automation runs (a control port was asked for) leave the user's AI apps alone.
+                // CraftTools: no `ai_connect::begin`: the AI apps' configuration files are changed only
+                // by Help ▸ Connect AI assistants.
                 if !self.take_focus_unwanted {
-                    solidcraft_ui_egui::ai_connect::begin(&mut self.solve);
                     solidcraft_ui_egui::agent_chat::begin(&mut self.solve);
                 }
                 if !self.setup.settled() {
@@ -882,7 +883,9 @@ fn services(cc: &eframe::CreationContext<'_>, folder: &DialogFolder) -> Services
         can_restore: None,
         restore_file: None,
         download_design: None,
-        easyprint_upload: Some(std::sync::Arc::new(easyprint_upload)),
+        // CraftTools: no EasyPrint: no model is uploaded to Printables (the menu row is hidden and
+        // `file.open_in_easyprint` refuses).
+        easyprint_upload: None,
         browser_files: None,
         agent_http: Some(std::sync::Arc::new(agent_http)),
         secrets: Some(std::sync::Arc::new(Keychain("SolidCraft agent chat"))),
@@ -979,24 +982,6 @@ fn agent_http(r: &solidcraft_ui_egui::agent_chat::backend::HttpRequest) -> Resul
     let status = response.status().as_u16();
     let body = response.body_mut().with_config().limit(16 << 20).read_to_vec().map_err(|e| e.to_string())?;
     Ok((status, body))
-}
-
-/// Open with EasyPrint: upload the model to Printables' import endpoint on a worker and answer on
-/// `done` with the address to open. Through [`agent_http`]: no redirects, a timeout, no cookies.
-fn easyprint_upload(name: &str, bytes: Vec<u8>, done: std::sync::mpsc::Sender<Result<String, String>>) {
-    use solidcraft_engine::easyprint;
-    let name = name.to_string();
-    std::thread::spawn(move || {
-        let (content_type, body) = easyprint::multipart(&name, &bytes);
-        let request = solidcraft_ui_egui::agent_chat::backend::HttpRequest {
-            method: "POST",
-            url: easyprint::IMPORT_URL.into(),
-            headers: vec![("Content-Type".into(), content_type), ("Accept".into(), "application/json".into())],
-            body: Some(body),
-            timeout_s: 180,
-        };
-        let _ = done.send(agent_http(&request).and_then(|(status, body)| easyprint::parse_import_response(status, &body)));
-    });
 }
 
 /// Secrets in the system keychain: API keys (service "SolidCraft agent chat", one entry per
