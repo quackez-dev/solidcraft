@@ -1431,10 +1431,13 @@ preference_settings! {
     agent_off_thread: bool = false, PAGE_ASSISTANT;
     /// Let AI agents connect: the localhost control channel (MCP) opens on the default port at
     /// start-up, unless `--control`/`SOLIDCRAFT_CONTROL_PORT` name one. Read at start-up.
-    agent_control: bool = true, PAGE_ASSISTANT;
+    /// CraftTools: off by default; Preferences ▸ Assistant or `--control` opens it.
+    agent_control: bool = false, PAGE_ASSISTANT;
     /// Add SolidCraft's MCP server to the AI apps installed on this computer at start-up
     /// ([`crate::ai_connect`]); off takes the entries out again.
-    connect_ai_apps: bool = true, PAGE_ASSISTANT;
+    /// CraftTools: off, and the start-up step is not armed (apps/solidcraft/src/main.rs); Help ▸
+    /// Connect AI assistants still does it when asked.
+    connect_ai_apps: bool = false, PAGE_ASSISTANT;
     /// Agents the user added (the installed ones are found by themselves). API keys are never
     /// here: they live in the system keychain.
     agents: Vec<crate::agent_chat::agents::AgentConfig> = Vec::new();
@@ -7976,17 +7979,17 @@ mod tests {
         assert_eq!(app.preferences.msaa, Prefs::default().msaa);
     }
 
-    /// "Let AI agents connect" is on for a new install and for preferences saved before it existed;
-    /// an explicit off stays off.
+    /// CraftTools: "Let AI agents connect" is off for a new install and for preferences saved before
+    /// it existed; an explicit on stays on.
     #[test]
-    fn agent_control_is_on_unless_saved_off() {
-        assert!(Prefs::default().agent_control);
+    fn agent_control_is_off_unless_saved_on() {
+        assert!(!Prefs::default().agent_control);
         let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
-        app.preferences.agent_control = false;
+        app.preferences.agent_control = true;
         app.load_prefs(&serde_json::json!({ "preferences": { "msaa": 4 } }).to_string());
-        assert!(app.preferences.agent_control);
-        app.load_prefs(&serde_json::json!({ "preferences": { "agent_control": false } }).to_string());
         assert!(!app.preferences.agent_control);
+        app.load_prefs(&serde_json::json!({ "preferences": { "agent_control": true } }).to_string());
+        assert!(app.preferences.agent_control);
     }
 
     #[test]

@@ -147,10 +147,11 @@ mod tests {
     }
 
     #[test]
-    fn it_is_on_by_default_and_saved_off_stays_off() {
-        assert!(crate::prefs::Prefs::default().connect_ai_apps);
+    // CraftTools: off by default.
+    fn it_is_off_by_default_and_saved_on_stays_on() {
+        assert!(!crate::prefs::Prefs::default().connect_ai_apps);
         let mut app = SolveApp::new(Default::default(), Default::default());
-        app.load_prefs(&serde_json::json!({ "preferences": { "connect_ai_apps": false } }).to_string());
-        assert!(!app.preferences.connect_ai_apps);
+        app.load_prefs(&serde_json::json!({ "preferences": { "connect_ai_apps": true } }).to_string());
+        assert!(app.preferences.connect_ai_apps);
     }
 }
