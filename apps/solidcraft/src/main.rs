@@ -889,8 +889,11 @@ fn services(cc: &eframe::CreationContext<'_>, folder: &DialogFolder) -> Services
         browser_files: None,
         agent_http: Some(std::sync::Arc::new(agent_http)),
         secrets: Some(std::sync::Arc::new(Keychain("SolidCraft agent chat"))),
-        tickets_http: Some(std::sync::Arc::new(tickets_http)),
-        ticket_secrets: Some(std::sync::Arc::new(Keychain("SolidCraft tickets"))),
+        // CraftTools: no ticket server: nothing goes to tickets.solidcraft.io (report, log, capture,
+        // computer name). Report a bug opens a GitHub draft in the browser, and an agent's
+        // `diagnostics.report_issue` refuses.
+        tickets_http: None,
+        ticket_secrets: None,
         show_in_folder: Some(Box::new(|path| {
             let folder = std::path::Path::new(path).parent().unwrap_or_else(|| std::path::Path::new("."));
             let mut command = std::process::Command::new(if cfg!(target_os = "windows") {
@@ -994,62 +997,7 @@ impl Keychain {
     }
 }
 
-/// HTTP to the ticket server for problem reports (docs/problem-reports.md): on a worker thread, HTTPS
-/// only (a local test server aside), no redirects (the token must not follow one), at most 16 MB
-/// back. The answer comes on `done`.
-fn tickets_http(r: solidcraft_ui_egui::agent_chat::backend::HttpRequest, done: std::sync::mpsc::Sender<solidcraft_ui_egui::tickets::Reply>) {
-    let spawned = std::thread::Builder::new().name("tickets-http".into()).spawn(move || {
-        // HTTPS, or plain HTTP to this computer (a test server): the host compared exactly.
-        let reply = if solidcraft_ui_egui::tickets::api::allowed_url(&r.url) { tickets_call(&r) } else { Err("only HTTPS is allowed".into()) };
-        let _ = done.send(reply);
-    });
-    // Without a worker the sender is dropped with the closure: the report sees no answer and
-    // waits in the queue.
-    drop(spawned);
-}
-
-fn tickets_call(r: &solidcraft_ui_egui::agent_chat::backend::HttpRequest) -> Result<(u16, Vec<u8>), String> {
-    use std::time::Duration;
-    let tls = ureq::tls::TlsConfig::builder()
-        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-        .unversioned_rustls_crypto_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
-        .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(tls)
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(r.timeout_s.clamp(1, 3600))))
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .user_agent(concat!("SolidCraft/", env!("CARGO_PKG_VERSION")))
-        .max_redirects(0)
-        .build()
-        .into();
-    let body = r.body.as_deref().unwrap_or_default();
-    macro_rules! with_headers {
-        ($req:expr) => {{
-            // Each call has its own agent, so a kept-alive connection is never used again. Asked
-            // to close, the server ends a reply that has no length by closing; otherwise the
-            // reply is read until the server gives up and the call ends on `timeout: global`
-            // (#17932).
-            let mut req = $req.header("Connection", "close");
-            for (k, v) in &r.headers {
-                req = req.header(k, v);
-            }
-            req
-        }};
-    }
-    let mut response = match r.method {
-        "GET" => with_headers!(agent.get(&r.url)).call(),
-        "POST" => with_headers!(agent.post(&r.url)).send(body),
-        "PUT" => with_headers!(agent.put(&r.url)).send(body),
-        "PATCH" => with_headers!(agent.patch(&r.url)).send(body),
-        "DELETE" => with_headers!(agent.delete(&r.url)).call(),
-        other => return Err(format!("unsupported method {other}")),
-    }
-    .map_err(|e| e.to_string())?;
-    let status = response.status().as_u16();
-    let body = response.body_mut().with_config().limit(16 << 20).read_to_vec().map_err(|e| e.to_string())?;
-    Ok((status, body))
-}
+// CraftTools: `tickets_http` and `tickets_call` (HTTP to the ticket server) are removed (SC-7).
 
 impl solidcraft_ui_egui::agent_chat::backend::Secrets for Keychain {
     fn get(&self, id: &str) -> Result<Option<String>, String> {
@@ -2270,48 +2218,7 @@ mod backend_tests {
     }
 }
 
-#[cfg(test)]
-mod tickets_http_tests {
-    use super::tickets_call;
-    use solidcraft_ui_egui::agent_chat::backend::HttpRequest;
-    use std::io::{Read, Write};
-
-    /// A server that answers without a length and keeps the connection open unless the request
-    /// asked to close it: the reply ends only when the connection does (#17932).
-    #[test]
-    fn a_ticket_reply_without_a_length_ends_without_waiting_for_the_timeout() {
-        let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0u8; 4096];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = stream.read(&mut buf).unwrap();
-                assert!(n > 0, "the request ended early");
-                request.extend_from_slice(&buf[..n]);
-            }
-            let reply = b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{\"id\":\"up1\"}";
-            stream.write_all(reply).unwrap();
-            let close = String::from_utf8_lossy(&request).to_ascii_lowercase().contains("connection: close");
-            if !close {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-            }
-        });
-        let request = HttpRequest {
-            method: "POST",
-            url: format!("http://127.0.0.1:{port}/api/uploads"),
-            headers: vec![("Content-Type".into(), "application/json".into())],
-            body: Some(b"{}".to_vec()),
-            timeout_s: 3,
-        };
-        let started = std::time::Instant::now();
-        let reply = tickets_call(&request);
-        assert_eq!(reply, Ok((201, br#"{"id":"up1"}"#.to_vec())), "after {:?}", started.elapsed());
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "the reply ended with the connection, not the timeout");
-        server.join().unwrap();
-    }
-}
+// CraftTools: the `tickets_http_tests` module is removed with `tickets_call` (SC-7).
 
 #[cfg(test)]
 mod prefs_writer_tests {
