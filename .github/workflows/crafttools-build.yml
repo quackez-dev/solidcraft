@@ -11,6 +11,11 @@
 # - The build runs offline (`--offline`). On Linux it also runs in a network namespace with no
 #   network at all.
 # - Packaging tools are pinned by version and SHA-256 (WiX by version, from NuGet).
+# - No release and no write token: the files are a one-day workflow artifact (this repository is
+#   public, so anyone signed in to GitHub can download it while it exists). CraftTools fetches them
+#   to the PC right after the build, checks the SHA-256 sums, then deletes the artifact.
+# - Linux: a swap file before the build (a private repository's 2-CPU, 7 GB runner ran out of
+#   memory on it; the public runners have 16 GB, the swap file is a margin).
 name: CraftTools build
 
 on:
@@ -39,6 +44,7 @@ env:
 jobs:
   build:
     name: build (${{ matrix.os }})
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +76,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libdbus-1-dev desktop-file-utils appstream
+
+      - name: Swap file (Linux)
+        if: runner.os == 'Linux'
+        # A margin for this build's memory (a 2-CPU, 7 GB runner stopped answering without it).
+        # Up to 24 GB of swap on the runner's temporary disk.
+        run: |
+          set -euo pipefail
+          free -m; df -h / /mnt
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          # The temporary disk if it has room, else the root disk (the build needs ~15 GB there).
+          dir=/mnt; reserve=4
+          avail_gb=$(df --output=avail -BG "$dir" | tail -1 | tr -dc '0-9')
+          if [ "$avail_gb" -lt 12 ]; then
+            dir=/; reserve=25
+            avail_gb=$(df --output=avail -BG "$dir" | tail -1 | tr -dc '0-9')
+          fi
+          size_gb=$(( avail_gb - reserve ))
+          if [ "$size_gb" -gt 24 ]; then size_gb=24; fi
+          if [ "$size_gb" -lt 4 ]; then echo "no room for a swap file" >&2; exit 1; fi
+          sudo fallocate -l "${size_gb}G" "$dir/crafttools.swap"
+          sudo chmod 600 "$dir/crafttools.swap"
+          sudo mkswap "$dir/crafttools.swap"
+          sudo swapon "$dir/crafttools.swap"
+          free -m
 
       - name: Fetch crates (crates.io, Cargo.lock checksums)
         working-directory: solidcraft
@@ -147,22 +178,5 @@ jobs:
           name: solidcraft-${{ runner.os }}
           path: dist/*
           if-no-files-found: error
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/crafttools-v')
-    needs: build
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - name: Publish the release (private repository)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          gh run download "${{ github.run_id }}" -R "${{ github.repository }}" -D dist
-          gh release create "$TAG" -R "${{ github.repository }}" --title "SolidCraft $TAG (CraftTools)" \
-            --notes "Audited build of SolidCraft (commit ${{ github.sha }}). Unsigned. Audit: CraftTools/audits/solidcraft." \
-            dist/*/*
+          # CraftTools: fetched to the PC right after the build, then deleted; never a release.
+          retention-days: 1
